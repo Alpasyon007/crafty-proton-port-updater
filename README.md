@@ -42,6 +42,8 @@ ProtonVPN (random forwarded port, rotates every few hours)
 | `GLUETUN_API` | `http://127.0.0.1:8000` | Gluetun control-server base URL (used to read the exit IP) |
 | `GLUETUN_API_KEY` | *(empty)* | API key for gluetun 3.40+ authenticated control server; leave empty when using `auth = "none"` |
 | `POLL_SECONDS` | `5` | How often to check `PORT_FILE` for changes |
+| `CRAFTY_RESTART_MAX_ATTEMPTS` | `6` | Total attempts for `crafty_restart` on connection refused / timeout — handles Crafty's slow Tornado-server startup race on cold boot |
+| `CRAFTY_RESTART_RETRY_DELAY` | `5` | Seconds between `crafty_restart` retry attempts |
 
 ### Optional — Cloudflare DNS
 
@@ -201,6 +203,7 @@ Then restart the Crafty container.
 | Crafty or port-updater can't reach each other | `network_mode: container:<name>` requires gluetun running first | The restart policy usually recovers; check `docker ps` for gluetun status |
 | NAT-PMP port forwarding fails with `i/o timeout` | `FIREWALL_OUTBOUND_SUBNETS` includes `10.0.0.0/8`, overlapping Proton's WireGuard gateway | Use LAN-specific CIDR only (e.g. `192.168.1.0/24`) |
 | Crafty WebUI unreachable on port 30025 | `FIREWALL_INPUT_PORTS` not set — gluetun blocks inbound 8443 | Add `FIREWALL_INPUT_PORTS=8443,8000` to gluetun environment |
+| port-updater logs `Crafty restart … failed after 6 attempts` on first deploy | Crafty's Tornado HTTPS server takes 30–60 s to bind `:8443` on cold boot | The updater now retries automatically (6 × 5 s). No manual WebUI restart needed. Increase `CRAFTY_RESTART_MAX_ATTEMPTS` if your hardware is slower. |
 
 ## Docker image
 

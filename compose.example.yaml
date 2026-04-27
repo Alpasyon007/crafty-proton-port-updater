@@ -111,6 +111,11 @@ services:
 
       # --- polling interval
       - POLL_SECONDS=5
+
+      # Crafty restart retry tuning (defaults shown). Increase max attempts
+      # if Crafty boots slowly on your hardware.
+      # - CRAFTY_RESTART_MAX_ATTEMPTS=6
+      # - CRAFTY_RESTART_RETRY_DELAY=5
     volumes:
       - /mnt/Apps/app-configs/shared:/shared
       - /mnt/Apps/app-configs/crafty/servers:/crafty/servers
