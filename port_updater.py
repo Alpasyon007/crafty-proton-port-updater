@@ -17,6 +17,7 @@ All configuration is via environment variables.  Python 3.12 stdlib only.
 import json
 import logging
 import os
+import socket
 import ssl
 import sys
 import time
@@ -51,6 +52,10 @@ GLUETUN_API: str = os.environ.get("GLUETUN_API", "http://127.0.0.1:8000")
 GLUETUN_API_KEY: str = os.environ.get("GLUETUN_API_KEY", "")
 
 POLL_SECONDS: int = int(os.environ.get("POLL_SECONDS", "5"))
+
+# Crafty restart retry tuning — handles Crafty's slow Tornado-server startup race on cold boot
+CRAFTY_RESTART_MAX_ATTEMPTS: int = int(os.environ.get("CRAFTY_RESTART_MAX_ATTEMPTS", "6"))
+CRAFTY_RESTART_RETRY_DELAY: int = int(os.environ.get("CRAFTY_RESTART_RETRY_DELAY", "5"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -147,15 +152,31 @@ def update_server_properties(path: str, port: str) -> None:
 # Crafty REST API
 # ---------------------------------------------------------------------------
 def crafty_restart(server_id: str) -> bool:
-    """Ask Crafty to restart *server_id*.  Returns True on success."""
+    """Ask Crafty to restart *server_id*. Retries on connection-refused / timeout."""
     url = f"{CRAFTY_URL}/api/v2/servers/{server_id}/action/restart_server"
     headers = {"Authorization": f"Bearer {CRAFTY_TOKEN}"}
-    code, body = _http("POST", url, headers=headers, ctx=_SSL_CTX)
-    if 200 <= code < 300:
-        log.info("Crafty restart %s → HTTP %s", server_id, code)
-        return True
-    log.error("Crafty restart %s failed → HTTP %s: %s", server_id, code, body[:300])
-    return False
+
+    for attempt in range(1, CRAFTY_RESTART_MAX_ATTEMPTS + 1):
+        try:
+            code, body = _http("POST", url, headers=headers, ctx=_SSL_CTX)
+            if 200 <= code < 300:
+                log.info("Crafty restart %s → HTTP %s", server_id, code)
+                return True
+            log.error("Crafty restart %s failed → HTTP %s: %s", server_id, code, body[:300])
+            return False  # don't retry on real HTTP errors (401/404/5xx)
+        except (urllib.error.URLError, ConnectionRefusedError, socket.timeout) as exc:
+            if attempt < CRAFTY_RESTART_MAX_ATTEMPTS:
+                log.info(
+                    "Crafty not ready (attempt %d/%d): %s — retrying in %ds",
+                    attempt, CRAFTY_RESTART_MAX_ATTEMPTS, exc, CRAFTY_RESTART_RETRY_DELAY,
+                )
+                time.sleep(CRAFTY_RESTART_RETRY_DELAY)
+            else:
+                log.error(
+                    "Crafty restart %s failed after %d attempts: %s",
+                    server_id, CRAFTY_RESTART_MAX_ATTEMPTS, exc,
+                )
+                return False
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +341,7 @@ def main() -> None:
 
                 # 3. Restart servers via Crafty
                 for sid in SERVER_IDS:
-                    try:
-                        crafty_restart(sid)
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception("Crafty restart failed (%s): %s", sid, exc)
+                    crafty_restart(sid)  # already swallows transient errors and logs cleanly
 
                 last_port = current_port
                 last_exit_ip = current_ip
