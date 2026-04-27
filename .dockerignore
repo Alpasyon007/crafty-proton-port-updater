@@ -1,0 +1,10 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+compose*.yaml
+README.md
+LICENSE
+.gitignore
+.dockerignore

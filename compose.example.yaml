@@ -1,0 +1,100 @@
+# compose.example.yaml — Crafty + ProtonVPN (Gluetun) + port-updater
+#
+# Copy to compose.yaml, fill in every value marked "# CHANGE", then:
+#   docker compose up -d
+#
+# All three service containers share Gluetun's network namespace so they all
+# use the ProtonVPN tunnel and the port-updater can reach Crafty on localhost.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Gluetun — ProtonVPN WireGuard tunnel with port-forwarding
+  # ---------------------------------------------------------------------------
+  gluetun-crafty:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-crafty
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_TYPE=wireguard
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - WIREGUARD_PRIVATE_KEY=PASTE_WIREGUARD_PRIVATE_KEY_HERE   # CHANGE
+      - VPN_PORT_FORWARDING=on
+      - PORT_FORWARD_ONLY=on
+      - SERVER_COUNTRIES=Netherlands,Germany,France,United Kingdom
+      - BLOCK_MALICIOUS=off
+      - UPDATER_PERIOD=24h
+      - TZ=Europe/London
+      - DOT=off
+      - DNS_ADDRESS=1.1.1.1
+      # Allow forwarded port through the tunnel firewall
+      - FIREWALL_VPN_INPUT_PORTS=1024-65535
+      # Allow LAN clients to reach Crafty's web UI via the published ports
+      - FIREWALL_OUTBOUND_SUBNETS=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+      # Write the forwarded port to a shared file watched by port-updater
+      - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'echo {{PORT}} > /shared/forwarded_port'
+    volumes:
+      - /mnt/Apps/app-configs/gluetun-crafty:/gluetun
+      - /mnt/Apps/app-configs/shared:/shared
+    ports:
+      - "30025:8443/tcp"   # Crafty HTTPS web UI (LAN access)
+      - "30026:8000/tcp"   # Crafty HTTP / Gluetun control API (optional)
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Crafty Controller — Minecraft server manager
+  # ---------------------------------------------------------------------------
+  crafty:
+    image: registry.gitlab.com/crafty-controller/crafty-4:latest
+    container_name: crafty
+    depends_on:
+      - gluetun-crafty
+    network_mode: "service:gluetun-crafty"
+    environment:
+      - TZ=Europe/London
+    volumes:
+      - /mnt/Apps/app-configs/crafty/backups:/crafty/backups
+      - /mnt/Apps/app-configs/crafty/logs:/crafty/logs
+      - /mnt/Apps/app-configs/crafty/servers:/crafty/servers
+      - /mnt/Apps/app-configs/crafty/config:/crafty/app/config
+      - /mnt/Apps/app-configs/crafty/import:/crafty/import
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # port-updater — watches forwarded_port, updates DNS + server + Crafty
+  # ---------------------------------------------------------------------------
+  port-updater:
+    image: ghcr.io/alpasyon007/crafty-proton-port-updater:latest
+    container_name: crafty-port-updater
+    depends_on:
+      - crafty
+    network_mode: "service:gluetun-crafty"
+    environment:
+      # --- file written by Gluetun
+      - PORT_FILE=/shared/forwarded_port
+
+      # --- Crafty REST API (self-signed cert is accepted automatically)
+      - CRAFTY_URL=https://127.0.0.1:8443
+      - CRAFTY_TOKEN=PASTE_CRAFTY_API_TOKEN_HERE                          # CHANGE
+
+      # --- server UUIDs and matching server.properties paths (comma-separated)
+      - SERVER_IDS=PASTE_SERVER_UUID_HERE                                  # CHANGE
+      - SERVER_PROPS_PATHS=/crafty/servers/PASTE_SERVER_UUID_HERE/server.properties  # CHANGE
+
+      # --- Cloudflare DNS (leave empty to disable)
+      - CF_TOKEN=PASTE_CLOUDFLARE_API_TOKEN_HERE                          # CHANGE (or leave blank)
+      - CF_ZONE_ID=PASTE_CLOUDFLARE_ZONE_ID_HERE                          # CHANGE (or leave blank)
+      - CF_SRV_NAME=_minecraft._tcp.play.example.com                      # CHANGE to your domain
+      - CF_A_NAME=play.example.com                                        # CHANGE (or leave blank)
+      - CF_TARGET=play.example.com                                        # CHANGE to your domain
+      - CF_TTL=60
+
+      # --- polling interval
+      - POLL_SECONDS=5
+    volumes:
+      - /mnt/Apps/app-configs/shared:/shared
+      - /mnt/Apps/app-configs/crafty/servers:/crafty/servers
+    restart: unless-stopped
