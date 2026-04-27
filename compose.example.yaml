@@ -28,12 +28,21 @@ services:
       - BLOCK_MALICIOUS=off
       - UPDATER_PERIOD=24h
       - TZ=Europe/London
-      - DOT=off
-      - DNS_ADDRESS=1.1.1.1
-      # Allow forwarded port through the tunnel firewall
-      - FIREWALL_VPN_INPUT_PORTS=1024-65535
-      # Allow LAN clients to reach Crafty's web UI via the published ports
-      - FIREWALL_OUTBOUND_SUBNETS=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+      # DOT (DNS-over-TLS) and DNS_ADDRESS are omitted; gluetun defaults are fine.
+      # Gluetun 3.40+ requires authentication for its control API.
+      # The simplest option is to create /gluetun/auth/config.toml with auth="none"
+      # for the routes port-updater needs (see README — Deploying on TrueNAS SCALE).
+      # Alternatively set FIREWALL_INPUT_PORTS below and supply an API key to port-updater
+      # via GLUETUN_API_KEY.
+      # FIREWALL_VPN_INPUT_PORTS is intentionally omitted: gluetun does not support port
+      # ranges here and automatically opens the actively-forwarded NAT-PMP port when
+      # VPN_PORT_FORWARDING=on — no manual firewall rule is needed.
+      # Allow inbound from LAN to the Crafty WebUI (8443) and Gluetun control API (8000).
+      - FIREWALL_INPUT_PORTS=8443,8000
+      # Subnets reachable WITHOUT going through the VPN tunnel (your LAN).
+      # WARNING: Do NOT include 10.0.0.0/8 — it overlaps Proton's WireGuard gateway
+      # (e.g. 10.2.0.1) and breaks NAT-PMP port forwarding.
+      - FIREWALL_OUTBOUND_SUBNETS=192.168.1.0/24
       # Write the forwarded port to a shared file watched by port-updater
       - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'echo {{PORT}} > /shared/forwarded_port'
     volumes:
@@ -77,6 +86,9 @@ services:
       - PORT_FILE=/shared/forwarded_port
 
       # --- Crafty REST API (self-signed cert is accepted automatically)
+      # Note: CRAFTY_URL defaults to https://127.0.0.1:8443. For this to work,
+      # Crafty must bind 0.0.0.0; edit https_bind in /crafty/app/config/config.json:
+      #   "https_bind": "0.0.0.0"
       - CRAFTY_URL=https://127.0.0.1:8443
       - CRAFTY_TOKEN=PASTE_CRAFTY_API_TOKEN_HERE                          # CHANGE
 
@@ -91,6 +103,11 @@ services:
       - CF_A_NAME=play.example.com                                        # CHANGE (or leave blank)
       - CF_TARGET=play.example.com                                        # CHANGE to your domain
       - CF_TTL=60
+
+      # --- Gluetun control API (optional — needed only if auth is enabled)
+      # Leave empty to skip authentication (requires auth="none" in config.toml).
+      # Set to your API key if you use apikey auth in /gluetun/auth/config.toml.
+      # - GLUETUN_API_KEY=your_api_key_here
 
       # --- polling interval
       - POLL_SECONDS=5

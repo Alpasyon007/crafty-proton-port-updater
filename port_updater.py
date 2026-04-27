@@ -47,6 +47,8 @@ CF_TTL: int = int(os.environ.get("CF_TTL", "60"))
 
 # Gluetun control-server base URL (shares the network namespace, so localhost)
 GLUETUN_API: str = os.environ.get("GLUETUN_API", "http://127.0.0.1:8000")
+# Optional API key for gluetun 3.40+ authenticated control server (leave empty to skip)
+GLUETUN_API_KEY: str = os.environ.get("GLUETUN_API_KEY", "")
 
 POLL_SECONDS: int = int(os.environ.get("POLL_SECONDS", "5"))
 
@@ -98,7 +100,10 @@ def _http(
 def get_exit_ip() -> str | None:
     """Return the ProtonVPN exit IP from Gluetun's built-in control server."""
     try:
-        code, body = _http("GET", f"{GLUETUN_API}/v1/publicip/ip", timeout=10)
+        headers: dict = {}
+        if GLUETUN_API_KEY:
+            headers["X-API-Key"] = GLUETUN_API_KEY
+        code, body = _http("GET", f"{GLUETUN_API}/v1/publicip/ip", headers=headers, timeout=10)
         if code == 200:
             data = json.loads(body)
             return data.get("public_ip") or data.get("ip")
@@ -238,6 +243,37 @@ def cloudflare_update(port: str, exit_ip: str | None) -> None:
             log.warning("CF_A_NAME set but exit IP unknown — skipping A record update")
 
 
+def _cf_upsert_a_only(exit_ip: str) -> None:
+    """Update only the Cloudflare A record with a new exit IP (no SRV change)."""
+    if not (CF_TOKEN and CF_ZONE_ID and CF_A_NAME):
+        return
+    _cf_upsert(
+        "A",
+        CF_A_NAME,
+        {
+            "type": "A",
+            "name": CF_A_NAME,
+            "content": exit_ip,
+            "ttl": CF_TTL,
+            "proxied": False,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Port-file reader
+# ---------------------------------------------------------------------------
+def _read_port_file() -> str | None:
+    """Read and validate the forwarded port from PORT_FILE; return None if absent/invalid."""
+    if not os.path.exists(PORT_FILE):
+        return None
+    with open(PORT_FILE) as fh:
+        raw = fh.read().strip()
+    if raw and raw.isdigit() and 1024 <= int(raw) <= 65535:
+        return raw
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main polling loop
 # ---------------------------------------------------------------------------
@@ -248,37 +284,58 @@ def main() -> None:
     log.info("Cloudflare SRV=%s  A=%s  target=%s", CF_SRV_NAME or "(off)", CF_A_NAME or "(off)", CF_TARGET or "(off)")
 
     last_port: str | None = None
+    last_exit_ip: str | None = None
 
     while True:
         try:
-            if os.path.exists(PORT_FILE):
-                with open(PORT_FILE) as fh:
-                    raw = fh.read().strip()
+            current_port = _read_port_file()
+            current_ip = get_exit_ip()  # always poll — cheap, local
 
-                if raw and raw.isdigit() and 1024 <= int(raw) <= 65535 and raw != last_port:
-                    log.info("Port change detected: %s → %s", last_port, raw)
+            port_changed = current_port is not None and current_port != last_port
+            ip_changed = current_ip is not None and current_ip != last_exit_ip
 
-                    # 1. Update server.properties for every managed server
-                    for path in SERVER_PROPS_PATHS:
-                        try:
-                            update_server_properties(path, raw)
-                        except Exception as exc:  # noqa: BLE001
-                            log.exception("server.properties update failed (%s): %s", path, exc)
+            if port_changed:
+                log.info("Port change detected: %s → %s", last_port, current_port)
 
-                    # 2. Update Cloudflare DNS
-                    exit_ip = get_exit_ip()
-                    if exit_ip:
-                        log.info("ProtonVPN exit IP: %s", exit_ip)
-                    cloudflare_update(raw, exit_ip)
+                # 1. Update server.properties for every managed server
+                for path in SERVER_PROPS_PATHS:
+                    try:
+                        update_server_properties(path, current_port)
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("server.properties update failed (%s): %s", path, exc)
 
-                    # 3. Restart servers via Crafty
-                    for sid in SERVER_IDS:
-                        try:
-                            crafty_restart(sid)
-                        except Exception as exc:  # noqa: BLE001
-                            log.exception("Crafty restart failed (%s): %s", sid, exc)
+                # Retry exit-IP fetch a few times if it failed (e.g. startup race
+                # where gluetun's HTTP control server hasn't bound :8000 yet).
+                if not current_ip:
+                    for _attempt in range(5):
+                        time.sleep(5)
+                        current_ip = get_exit_ip()
+                        if current_ip:
+                            break
 
-                    last_port = raw
+                # 2. Update Cloudflare DNS
+                if current_ip:
+                    log.info("ProtonVPN exit IP: %s", current_ip)
+                cloudflare_update(current_port, current_ip)
+
+                # 3. Restart servers via Crafty
+                for sid in SERVER_IDS:
+                    try:
+                        crafty_restart(sid)
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("Crafty restart failed (%s): %s", sid, exc)
+
+                last_port = current_port
+                last_exit_ip = current_ip
+
+            elif ip_changed and CF_A_NAME:
+                # Exit IP rotated without a port change — update A record only.
+                # This also fixes the startup race: if get_exit_ip() failed on the
+                # first cycle (gluetun not yet ready), it will succeed here on the
+                # next cycle and the A record will converge within POLL_SECONDS.
+                log.info("Exit IP change detected: %s → %s", last_exit_ip, current_ip)
+                _cf_upsert_a_only(current_ip)
+                last_exit_ip = current_ip
 
         except Exception as exc:  # noqa: BLE001
             log.exception("Unexpected loop error: %s", exc)

@@ -40,6 +40,7 @@ ProtonVPN (random forwarded port, rotates every few hours)
 | `PORT_FILE` | `/shared/forwarded_port` | File written by Gluetun's `VPN_PORT_FORWARDING_UP_COMMAND` |
 | `CRAFTY_URL` | `https://127.0.0.1:8443` | Crafty base URL (self-signed cert is accepted automatically) |
 | `GLUETUN_API` | `http://127.0.0.1:8000` | Gluetun control-server base URL (used to read the exit IP) |
+| `GLUETUN_API_KEY` | *(empty)* | API key for gluetun 3.40+ authenticated control server; leave empty when using `auth = "none"` |
 | `POLL_SECONDS` | `5` | How often to check `PORT_FILE` for changes |
 
 ### Optional — Cloudflare DNS
@@ -114,6 +115,92 @@ _minecraft._tcp         SRV   0 5 <placeholder-port> play.example.com
 ```
 
 Players connect to `play.example.com` — no port needed.
+
+## Deploying on TrueNAS SCALE
+
+### App installation
+
+Use the **Custom App** flow: **Apps → Discover Apps → Install via YAML** (not the catalog). Paste your `compose.yaml` directly into the YAML editor.
+
+### Dataset layout
+
+Create the following datasets under `/mnt/<pool>/Apps/app-configs/` before deploying:
+
+```
+gluetun-crafty/          → /gluetun       (gluetun state, VPN keys, auth config)
+shared/                  → /shared        (forwarded_port handoff file)
+crafty/config/           → /crafty/app/config
+crafty/servers/          → /crafty/servers
+crafty/backups/          → /crafty/backups
+crafty/logs/             → /crafty/logs
+crafty/import/           → /crafty/import
+```
+
+```bash
+mkdir -p /mnt/<pool>/Apps/app-configs/{gluetun-crafty,shared}
+mkdir -p /mnt/<pool>/Apps/app-configs/crafty/{config,servers,backups,logs,import}
+# TrueNAS apps run as UID 568 by default; use 1000 if your images expect it
+chown -R 568:568 /mnt/<pool>/Apps/app-configs/
+```
+
+### Cloudflare DNS records to pre-create
+
+Create these records once — the service will keep them updated:
+
+| Type | Name | Content | Notes |
+|------|------|---------|-------|
+| `A` | `play.example.com` | any placeholder IP | **DNS-only (grey cloud)** — proxying breaks Minecraft |
+| `SRV` | `_minecraft._tcp` | service `_minecraft`, proto `_tcp`, target `play.example.com`, port `25565` | players connect without a port number |
+
+### Crafty API token
+
+Log in → user icon (top-right) → **Panel Config** → **API Keys** → **+ New** →
+enable all server permissions → **Save** → copy the token into `CRAFTY_TOKEN`.
+
+### Gluetun control-server authentication (3.40+)
+
+Recent gluetun versions require authentication for the control API. The simplest
+workaround is to add a config file that allows unauthenticated access to the routes
+port-updater uses:
+
+```bash
+mkdir -p /mnt/<pool>/Apps/app-configs/gluetun-crafty/auth
+cat > /mnt/<pool>/Apps/app-configs/gluetun-crafty/auth/config.toml <<'EOF'
+[[roles]]
+name = "port-updater"
+routes = [
+  "GET /v1/publicip/ip",
+  "GET /v1/openvpn/portforwarded",
+]
+auth = "none"
+EOF
+chmod 644 /mnt/<pool>/Apps/app-configs/gluetun-crafty/auth/config.toml
+```
+
+Alternatively, use API-key auth and pass the key via `GLUETUN_API_KEY` in the
+port-updater environment.
+
+### Crafty bind address
+
+If `CRAFTY_URL=https://127.0.0.1:8443` returns connection errors, Crafty may be
+binding only to a specific bridge IP. Edit `/crafty/app/config/config.json` (inside
+the `crafty/config/` dataset) and set:
+
+```json
+"https_bind": "0.0.0.0"
+```
+
+Then restart the Crafty container.
+
+### Common pitfalls
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "Secure Connection Failed" / `SSL_ERROR_RX_RECORD_TOO_LONG` | Browsing `http://host:30026` — that's HTTP, not HTTPS | Use `http://` for the gluetun control port (8000) |
+| port-updater logs `WARNING Could not fetch exit IP from Gluetun` | gluetun control API requires authentication | Create `auth/config.toml` (see above) or set `GLUETUN_API_KEY` |
+| Crafty or port-updater can't reach each other | `network_mode: container:<name>` requires gluetun running first | The restart policy usually recovers; check `docker ps` for gluetun status |
+| NAT-PMP port forwarding fails with `i/o timeout` | `FIREWALL_OUTBOUND_SUBNETS` includes `10.0.0.0/8`, overlapping Proton's WireGuard gateway | Use LAN-specific CIDR only (e.g. `192.168.1.0/24`) |
+| Crafty WebUI unreachable on port 30025 | `FIREWALL_INPUT_PORTS` not set — gluetun blocks inbound 8443 | Add `FIREWALL_INPUT_PORTS=8443,8000` to gluetun environment |
 
 ## Docker image
 
