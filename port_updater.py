@@ -56,6 +56,8 @@ POLL_SECONDS: int = int(os.environ.get("POLL_SECONDS", "5"))
 # Crafty restart retry tuning — handles Crafty's slow Tornado-server startup race on cold boot
 CRAFTY_RESTART_MAX_ATTEMPTS: int = int(os.environ.get("CRAFTY_RESTART_MAX_ATTEMPTS", "6"))
 CRAFTY_RESTART_RETRY_DELAY: int = int(os.environ.get("CRAFTY_RESTART_RETRY_DELAY", "5"))
+# How long (seconds) to wait for Crafty to confirm the server has stopped before forcing start
+CRAFTY_STOP_TIMEOUT: int = int(os.environ.get("CRAFTY_STOP_TIMEOUT", "60"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -151,19 +153,36 @@ def update_server_properties(path: str, port: str) -> None:
 # ---------------------------------------------------------------------------
 # Crafty REST API
 # ---------------------------------------------------------------------------
-def crafty_restart(server_id: str) -> bool:
-    """Ask Crafty to restart *server_id*. Retries on connection-refused / timeout."""
-    url = f"{CRAFTY_URL}/api/v2/servers/{server_id}/action/restart_server"
+def _crafty_get_running(server_id: str) -> bool | None:
+    """Return True/False for the server running state, or None on transient API error."""
+    url = f"{CRAFTY_URL}/api/v2/servers/{server_id}/stats"
     headers = {"Authorization": f"Bearer {CRAFTY_TOKEN}"}
+    try:
+        code, body = _http("GET", url, headers=headers, ctx=_SSL_CTX)
+        if 200 <= code < 300:
+            payload = json.loads(body)
+            return bool(payload.get("data", {}).get("running", False))
+    except (urllib.error.URLError, ConnectionRefusedError, socket.timeout):
+        pass
+    return None
 
+
+def _crafty_action(server_id: str, action: str) -> bool:
+    """POST to /servers/<id>/action/<action> with retries on connection-refused."""
+    url = f"{CRAFTY_URL}/api/v2/servers/{server_id}/action/{action}"
+    headers = {"Authorization": f"Bearer {CRAFTY_TOKEN}"}
     for attempt in range(1, CRAFTY_RESTART_MAX_ATTEMPTS + 1):
         try:
             code, body = _http("POST", url, headers=headers, ctx=_SSL_CTX)
             if 200 <= code < 300:
-                log.info("Crafty restart %s → HTTP %s", server_id, code)
+                log.info("Crafty %s %s → HTTP %s", action, server_id, code)
                 return True
-            log.error("Crafty restart %s failed → HTTP %s: %s", server_id, code, body[:300])
-            return False  # don't retry on real HTTP errors (401/404/5xx)
+            if 400 <= code < 500:
+                # e.g. "Server already running" / "Server already stopped" — treat as benign
+                log.warning("Crafty %s %s → HTTP %s: %s", action, server_id, code, body[:200])
+                return True
+            log.error("Crafty %s %s → HTTP %s: %s", action, server_id, code, body[:300])
+            return False
         except (urllib.error.URLError, ConnectionRefusedError, socket.timeout) as exc:
             if attempt < CRAFTY_RESTART_MAX_ATTEMPTS:
                 log.info(
@@ -173,10 +192,48 @@ def crafty_restart(server_id: str) -> bool:
                 time.sleep(CRAFTY_RESTART_RETRY_DELAY)
             else:
                 log.error(
-                    "Crafty restart %s failed after %d attempts: %s",
-                    server_id, CRAFTY_RESTART_MAX_ATTEMPTS, exc,
+                    "Crafty %s %s failed after %d attempts: %s",
+                    action, server_id, CRAFTY_RESTART_MAX_ATTEMPTS, exc,
                 )
                 return False
+    return False
+
+
+def crafty_restart(server_id: str) -> bool:
+    """Bring the Minecraft server to a freshly-started state on the new port.
+
+    stop_server (if running) → poll until stopped → start_server.
+
+    Works correctly for all three cases:
+      - currently running  : stop, wait, start    (true restart, picks up new port)
+      - currently stopped  : stop no-ops, start   (cold-boot / crash recovery)
+      - currently crashed  : stop cleans up, start (crash recovery)
+    """
+    running = _crafty_get_running(server_id)
+
+    if running:
+        log.info("Crafty server %s is running — stopping before start", server_id)
+        if not _crafty_action(server_id, "stop_server"):
+            return False
+        # poll until Crafty reports stopped, or timeout
+        deadline = time.monotonic() + CRAFTY_STOP_TIMEOUT
+        while time.monotonic() < deadline:
+            time.sleep(3)
+            still_running = _crafty_get_running(server_id)
+            if still_running is False:
+                log.info("Crafty server %s confirmed stopped", server_id)
+                break
+            if still_running is None:
+                continue  # transient stats error, keep waiting
+        else:
+            log.warning(
+                "Crafty server %s did not confirm stopped within %ds — proceeding to start anyway",
+                server_id, CRAFTY_STOP_TIMEOUT,
+            )
+    else:
+        log.info("Crafty server %s is not running — skipping stop, starting directly", server_id)
+
+    return _crafty_action(server_id, "start_server")
 
 
 # ---------------------------------------------------------------------------
