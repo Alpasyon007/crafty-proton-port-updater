@@ -116,6 +116,10 @@ services:
       # if Crafty boots slowly on your hardware.
       # - CRAFTY_RESTART_MAX_ATTEMPTS=6
       # - CRAFTY_RESTART_RETRY_DELAY=5
+
+      # How long to wait for Crafty to report the server stopped before
+      # firing start_server anyway. Default: 60s.
+      # - CRAFTY_STOP_TIMEOUT=60
     volumes:
       - /mnt/Apps/app-configs/shared:/shared
       - /mnt/Apps/app-configs/crafty/servers:/crafty/servers

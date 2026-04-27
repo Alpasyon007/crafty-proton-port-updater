@@ -20,7 +20,7 @@ ProtonVPN (random forwarded port, rotates every few hours)
                   ├─ rewrites server.properties  (new port)
                   ├─ updates Cloudflare SRV record
                   ├─ updates Cloudflare A record  (ProtonVPN exit IP)
-                  └─ calls Crafty REST API to restart the server
+                  └─ calls Crafty REST API: stop_server → wait → start_server
 ```
 
 ## Environment Variables
@@ -42,8 +42,9 @@ ProtonVPN (random forwarded port, rotates every few hours)
 | `GLUETUN_API` | `http://127.0.0.1:8000` | Gluetun control-server base URL (used to read the exit IP) |
 | `GLUETUN_API_KEY` | *(empty)* | API key for gluetun 3.40+ authenticated control server; leave empty when using `auth = "none"` |
 | `POLL_SECONDS` | `5` | How often to check `PORT_FILE` for changes |
-| `CRAFTY_RESTART_MAX_ATTEMPTS` | `6` | Total attempts for `crafty_restart` on connection refused / timeout — handles Crafty's slow Tornado-server startup race on cold boot |
-| `CRAFTY_RESTART_RETRY_DELAY` | `5` | Seconds between `crafty_restart` retry attempts |
+| `CRAFTY_RESTART_MAX_ATTEMPTS` | `6` | Total attempts for each Crafty API call on connection refused / timeout — handles Crafty's slow Tornado-server startup race on cold boot |
+| `CRAFTY_RESTART_RETRY_DELAY` | `5` | Seconds between retry attempts for each Crafty API call |
+| `CRAFTY_STOP_TIMEOUT` | `60` | Seconds to wait for Crafty to confirm the server has stopped before sending `start_server` anyway |
 
 ### Optional — Cloudflare DNS
 
@@ -204,6 +205,7 @@ Then restart the Crafty container.
 | NAT-PMP port forwarding fails with `i/o timeout` | `FIREWALL_OUTBOUND_SUBNETS` includes `10.0.0.0/8`, overlapping Proton's WireGuard gateway | Use LAN-specific CIDR only (e.g. `192.168.1.0/24`) |
 | Crafty WebUI unreachable on port 30025 | `FIREWALL_INPUT_PORTS` not set — gluetun blocks inbound 8443 | Add `FIREWALL_INPUT_PORTS=8443,8000` to gluetun environment |
 | port-updater logs `Crafty restart … failed after 6 attempts` on first deploy | Crafty's Tornado HTTPS server takes 30–60 s to bind `:8443` on cold boot | The updater now retries automatically (6 × 5 s). No manual WebUI restart needed. Increase `CRAFTY_RESTART_MAX_ATTEMPTS` if your hardware is slower. |
+| After changing `CRAFTY_TOKEN`, the next port rotation fails with `HTTP 401` | The token in the environment no longer matches any active key in Crafty | In Crafty UI (Panel Config → API Keys) verify the token is still active, or create a new one and update `CRAFTY_TOKEN` in your env |
 
 ## Docker image
 
