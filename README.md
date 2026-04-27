@@ -205,7 +205,7 @@ Then restart the Crafty container.
 | NAT-PMP port forwarding fails with `i/o timeout` | `FIREWALL_OUTBOUND_SUBNETS` includes `10.0.0.0/8`, overlapping Proton's WireGuard gateway | Use LAN-specific CIDR only (e.g. `192.168.1.0/24`) |
 | Crafty WebUI unreachable on port 30025 | `FIREWALL_INPUT_PORTS` not set — gluetun blocks inbound 8443 | Add `FIREWALL_INPUT_PORTS=8443,8000` to gluetun environment |
 | port-updater logs `Crafty restart … failed after 6 attempts` on first deploy | Crafty's Tornado HTTPS server takes 30–60 s to bind `:8443` on cold boot | The updater now retries automatically (6 × 5 s). No manual WebUI restart needed. Increase `CRAFTY_RESTART_MAX_ATTEMPTS` if your hardware is slower. |
-| After changing `CRAFTY_TOKEN`, the next port rotation fails with `HTTP 401` | The old token was revoked or a new one was generated in Crafty | Regenerate the token in Crafty UI (Panel Config → API Keys) and update `CRAFTY_TOKEN` in your env |
+| After changing `CRAFTY_TOKEN`, the next port rotation fails with `HTTP 401` | The token in the environment no longer matches any active key in Crafty | In Crafty UI (Panel Config → API Keys) verify the token is still active, or create a new one and update `CRAFTY_TOKEN` in your env |
 
 ## Docker image
 

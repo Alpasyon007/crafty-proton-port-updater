@@ -230,8 +230,10 @@ def crafty_restart(server_id: str) -> bool:
                 "Crafty server %s did not confirm stopped within %ds — proceeding to start anyway",
                 server_id, CRAFTY_STOP_TIMEOUT,
             )
-    else:
+    elif running is False:
         log.info("Crafty server %s is not running — skipping stop, starting directly", server_id)
+    else:
+        log.warning("Crafty server %s state unknown (stats unavailable) — attempting start directly", server_id)
 
     return _crafty_action(server_id, "start_server")
 
